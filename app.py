@@ -27,35 +27,58 @@ kategori_listesi = list(kategori_map.keys())
 
 @st.cache_resource
 def get_pretrained_model():
-    np.random.seed(42)
-    n_samples = 2000 
+    csv_path = "retail_store_inventory.csv"
+    try:
+        df_train = pd.read_csv(csv_path)
+    except FileNotFoundError:
+        st.error(f"⚠️ Hata: '{csv_path}' dosyası bulunamadı. Lütfen 70.000 satırlık eğitim setini proje klasörüne ekleyin.")
+        st.stop()
+
+    # 2. KATEGORİLERİ SAYISALA ÇEVİRME
+    # Eğer verinde bu sütun yoksa haritaya (kategori_map) göre dönüştürür.
+    if 'Category_Code' not in df_train.columns:
+        df_train['Category_Code'] = df_train['Category'].map(kategori_map).fillna(0)
     
-    df_train = pd.DataFrame({
-        'Inventory Level': np.random.randint(0, 100, n_samples),
-        'Price': np.random.randint(10, 2000, n_samples),
-        'Competitor Pricing': np.random.randint(10, 2000, n_samples),
-        'Discount': np.random.choice([0, 0.1, 0.2, 0.3], n_samples),
-        'Units Sold': np.random.randint(0, 50, n_samples),
-        'Category': np.random.choice(kategori_listesi, n_samples)
-    })
+    # 3. LABELING (ETİKETLEME)
+    # Eğer 70binlik verinde 'is_dead_stock' diye bir sütun yoksa,
+    # senin mantığına göre (skorlama) bu sütunu oluşturuyoruz.
+    if 'is_dead_stock' not in df_train.columns:
+        # Vektörel işlem (For döngüsü 70bin satırda yavaş çalışır, bu yöntem hızlıdır)
+        conditions = [
+            (df_train['Units Sold'] < 5),
+            (df_train['Price'] > df_train['Competitor Pricing'] * 1.2),
+            ((df_train['Inventory Level'] > 80) & (df_train['Units Sold'] < 10))
+        ]
+        
+        # Senin skorlama mantığının aynısı:
+        scores = (conditions[0].astype(int) * 4) + \
+                 (conditions[1].astype(int) * 3) + \
+                 (conditions[2].astype(int) * 3)
+        
+        # Skor 4 ve üzeriyse 1 (Dead Stock), değilse 0
+        initial_labels = (scores >= 4).astype(int)
+        
+        # %10 oranında rastgele etiketleri bozuyoruz (Noise Injection)
+        # np.random.seed(42) # Sabit sonuç isterseniz bunu açın
+        random_noise = np.random.rand(len(df_train)) < 0.10 # %10 gürültü
+        
+        # Gürültü denk gelen yerleri tersine çevir (1 ise 0, 0 ise 1 yap)
+        # abs(1 - label) işlemi 1'i 0, 0'ı 1 yapar.
+        final_labels = np.where(random_noise, 1 - initial_labels, initial_labels)
+        
+        df_train['is_dead_stock'] = final_labels
     
-    is_dead_stock = []
-    for i in range(n_samples):
-        score = 0
-        if df_train['Units Sold'][i] < 5: score += 4
-        if df_train['Price'][i] > df_train['Competitor Pricing'][i] * 1.2: score += 3
-        if df_train['Inventory Level'][i] > 80 and df_train['Units Sold'][i] < 10: score += 3
-        if score >= 4: is_dead_stock.append(1)
-        else: is_dead_stock.append(0)
-    
-    df_train['is_dead_stock'] = is_dead_stock
-    df_train['Category_Code'] = df_train['Category'].map(kategori_map)
-    
+    # 4. MODEL EĞİTİMİ
     feature_cols = ['Inventory Level', 'Price', 'Competitor Pricing', 'Discount', 'Units Sold', 'Category_Code']
+    
+    # Eksik veri varsa temizle
+    df_train = df_train.dropna(subset=feature_cols)
+    
     X = df_train[feature_cols]
     y = df_train['is_dead_stock']
     
-    rf_model = RandomForestClassifier(n_estimators=100, random_state=12)
+    # n_jobs=-1 ile tüm işlemcileri kullanarak hızlı eğitir
+    rf_model = RandomForestClassifier(n_estimators=100, random_state=12, n_jobs=-1)
     rf_model.fit(X, y)
     
     return rf_model, feature_cols
